@@ -19,7 +19,6 @@
 # USA
 #
 # Joel Rosdahl <joel@rosdahl.net>
-
 import os
 import re
 import select
@@ -30,9 +29,15 @@ import tempfile
 import time
 from datetime import datetime
 from optparse import OptionParser
+from threading import Thread
 
 VERSION = "1.1"
-
+CHANNEL = "#somechan"
+# DEFAULT_MOTD = []
+DEFAULT_MOTD = [
+    '**************** README ************************',
+    'To join the chat channel, type /join %s' % CHANNEL,
+    'To see history (after joining channel), type /msg histbot <cnt> <search_term>',]
 
 def create_directory(path):
     if not os.path.isdir(path):
@@ -709,7 +714,7 @@ class Server(object):
             except IOError:
                 return ["Could not read MOTD file %r." % self.motdfile]
         else:
-            return []
+            return DEFAULT_MOTD
 
     def print_info(self, msg):
         if self.verbose:
@@ -771,6 +776,9 @@ class Server(object):
             self.print_info("Setting uid:gid to %s:%s"
                             % (self.setuid[0], self.setuid[1]))
         last_aliveness_check = time.time()
+        histbot_thread = Thread(target=histbot, args=(self.ports[0],))
+        histbot_thread.daemon = True
+        histbot_thread.start()
         while True:
             (iwtd, owtd, ewtd) = select.select(
                 serversockets + [x.socket for x in self.clients.values()],
@@ -928,4 +936,66 @@ def main(argv):
         server.print_error("Interrupted.")
 
 
-main(sys.argv)
+def get_history(hist, requestor, query):
+    # print('query %s' % query)
+    arguments = query.split(' ')
+    # print('args %s' % arguments)
+    cnt = 40
+    search = None
+    if len(arguments) > 0:
+        try:
+            cnt = int(arguments[0])
+        except ValueError:
+            search = arguments[0]
+    if len(arguments) > 1:
+        search = arguments[1]
+    # print('args: %s, search: %s' % (cnt, search))
+    log_idx = len(hist) - 1
+    matches = []
+    while len(matches) < cnt and log_idx >= 0:
+        evt = hist[log_idx]
+        if search is None or search in evt:
+            matches.append(evt.rstrip())
+        log_idx -= 1
+    hist_str = ''
+    if len(matches) == 0:
+        matches.append('No matching history found')
+    matches.reverse()
+    for m in matches:
+        hist_str += 'PRIVMSG %s :%s\r\n' % (requestor, m)
+    return hist_str
+
+
+def histbot(port):
+    time.sleep(5)
+    NICK = "histbot"
+    IDENT = NICK
+    REALNAME = NICK
+    s = socket.socket()
+    s.connect(('127.0.0.1', port))
+    s.send("NICK %s\r\n" % NICK)
+    s.send("USER %s %s bla :%s\r\n" % (IDENT, '127.0.0.1', REALNAME))
+    s.send("JOIN %s\r\n" % (CHANNEL))
+    readbuffer = ""
+    history = []
+    while 1:
+        readbuffer = readbuffer + s.recv(1024)
+        temp = readbuffer.split("\n")
+        readbuffer = temp.pop()
+        for line in temp:
+            line = line.rstrip()
+            if line.startswith("PING"):
+                s.send("PONG %s\r\n" % line.strip()[1])
+            else:
+                print('%s' % line)
+                if 'PRIVMSG %s :' % NICK in line:
+                    requestor = line.split('!')[0].lstrip(':')
+                    query = line.split(':', 2)[-1]
+                    s.send('PRIVMSG %s :%s requested history with query %s\r\n' % (CHANNEL, requestor, query))
+                    s.send(get_history(history, requestor, query))
+                else:
+                    history.append(line)
+
+
+if __name__ == "__main__":
+    main(sys.argv)
